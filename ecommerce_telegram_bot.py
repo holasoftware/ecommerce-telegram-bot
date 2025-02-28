@@ -24,7 +24,7 @@ BOT_TOKEN = os.getenv("BOT_TELEGRAM_TOKEN")
 
 # PAYMENT_PROVIDER_TOKEN: You need to replace this with your actual payment provider token (e.g., Stripe, Yandex.Checkout)
 PAYMENT_PROVIDER_TOKEN = os.environ.get("BOT_TELEGRAM_PAYMENT_PROVIDER_TOKEN")
-LANGUAGE_CODE = os.getenv("BOT_TELEGRAM_LANGUAGE_CODE")
+LANGUAGE_CODE = os.getenv("BOT_TELEGRAM_LANGUAGE_CODE", "en")
 
 translations = {
     "en": {
@@ -34,7 +34,7 @@ translations = {
 
 def _(text):
     """Translate text according to the current language"""
-    return translations[LANGUAGE_CODE].get(text, text) 
+    return translations.get(LANGUAGE_CODE, {}).get(text, text) 
 
 
 @dataclass
