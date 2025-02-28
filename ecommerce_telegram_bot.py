@@ -604,7 +604,7 @@ class EcommerceTelegramBot:
     def get_invoice_payload(self, user_id, cart):
         return 'some-invoice-payload'
 
-    def _pre_checkout_query(self, update: Update, context: CallbackContext) -> None:
+    async def _pre_checkout_query(self, update: Update, context: CallbackContext) -> None:
         """
        * This function handles pre-checkout queries, which are sent by Telegram to verify the payment details.
        * It checks if the total amount matches the expected amount.
@@ -613,9 +613,9 @@ class EcommerceTelegramBot:
 
         query = update.pre_checkout_query
         if query.total_amount != sum(price.amount for price in context.user_data['prices']):
-            query.answer(ok=False, error_message="Price mismatch")
+            await query.answer(ok=False, error_message="Price mismatch")
         else:
-            query.answer(ok=True)
+            await query.answer(ok=True)
 
     async def _successful_payment(self, update: Update, context: CallbackContext) -> None:
         """
