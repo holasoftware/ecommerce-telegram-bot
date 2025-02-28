@@ -806,7 +806,7 @@ Recommend products based on the user's request:
         await query.message.reply_text(product_text, reply_markup=reply_markup, parse_mode=telegram.ParseMode.MARKDOWN)
 
     def run(self):
-        self.application.run(allowed_updates=Update.ALL_TYPES)
+        self.application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 def main() -> None:
