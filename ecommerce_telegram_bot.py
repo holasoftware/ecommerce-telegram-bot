@@ -6,8 +6,11 @@ from decimal import Decimal
 from dataclasses import dataclass
 from enum import Enum, auto
 
-
-import litellm
+# litellm is an optional dependency
+try:
+    import litellm
+except ImportError:
+    litellm = None
 
 import telegram
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, InputMediaPhoto
@@ -323,6 +326,10 @@ class EcommerceTelegramBot:
         self.llm_model = llm_model
         self.llm_temperature = llm_temperature
 
+        if product_recommendations_enabled and litellm is None:
+            logger.warn("Module 'litellm' is not installed. Not possible to use product recommendations feature")
+            product_recommendations_enabled = False
+
         self.product_recommendations_enabled = product_recommendations_enabled
         self.payment_provider_token = payment_provider_token
 
@@ -344,7 +351,7 @@ class EcommerceTelegramBot:
         self.application = application
     
     def _add_handlers_to_tg_app(self, application):
-        application.add_handler(CommandHandler('start', start))
+        application.add_handler(CommandHandler('start', self._start))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_user_text))
         application.add_handler(CallbackQueryHandler(self._show_orders, pattern=r'^orders$'))
         application.add_handler(CallbackQueryHandler(self._show_categories, pattern=r'^categories$'))
@@ -370,6 +377,10 @@ class EcommerceTelegramBot:
 
     def _start(self, update: Update, context: CallbackContext) -> None:
         self._show_main_menu(update, context)
+
+    async def _show_orders(self, update: Update, context: CallbackContext) -> None:
+        # TODO
+        pass
 
     async def _show_main_menu(self, update: Update, context: CallbackContext) -> None:
         reply_markup = InlineKeyboardMarkup([
