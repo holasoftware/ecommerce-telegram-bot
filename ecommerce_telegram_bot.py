@@ -383,7 +383,7 @@ class EcommerceTelegramBot:
         application.add_handler(PreCheckoutQueryHandler(self._pre_checkout_query))
         application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, self._successful_payment))
         application.add_handler(ConversationHandler(
-            entry_points=[MessageHandler(filters.regex(r'^Get Recommendations$'), self._get_recommendations)],
+            entry_points=[MessageHandler(filters.Regex(r'^Get Recommendations$'), self._get_recommendations)],
             states={
                 self.EcommerceTelegramBotState.RECOMMENDATIONS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_request_for_product_recommendations)]
             },
