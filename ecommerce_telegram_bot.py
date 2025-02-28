@@ -279,6 +279,27 @@ class EcommerceDemo(Ecommerce):
 
         self._generate_demo_data()
 
+    def browse_products(self, q=None, category_id=None, limit=None):
+        if category_id is None:
+            found_products = self._products
+        else:
+            product_ids = self._products_in_category[category_id]
+            found_products = []
+            for product_id in product_ids:
+                found_products.append(self._products[product_id])
+
+        if len(found_products) == 0:
+            return found_products
+
+        if q is not None:
+            q = q.lower()
+            found_products = [product for product in found_products if q in product.name.lower()]
+
+        if limit is not None:
+            found_products = found_products[:limit]
+
+        return found_products
+
     def _generate_demo_data(self):
         categories = self.categories
 
@@ -429,6 +450,9 @@ class EcommerceTelegramBot:
             query.edit_message_text(_('No products found in this category.'))
 
         await self._show_main_menu(update, context)
+
+    async def _search_products_in_category(self, update: Update, context: CallbackContext) -> None:
+        pass
 
     async def _add_one_item_to_cart_and_notify_message(self, update: Update, context: CallbackContext) -> None:
         query = update.callback_query
