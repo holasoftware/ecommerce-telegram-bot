@@ -376,7 +376,7 @@ class EcommerceTelegramBot:
         application.add_handler(CallbackQueryHandler(self._remove_product_from_cart, pattern=r'^remove_product_from_cart:'))
 
     def _start(self, update: Update, context: CallbackContext) -> None:
-        self._show_main_menu(update, context)
+        await self._show_main_menu(update, context)
 
     async def _show_orders(self, update: Update, context: CallbackContext) -> None:
         # TODO
