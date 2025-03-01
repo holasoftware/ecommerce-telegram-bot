@@ -724,7 +724,7 @@ class EcommerceTelegramBot:
                 [
                     InlineKeyboardButton(
                         _("Search products in this category"),
-                        callback_data=f"start_search_in_category:{product.id}",
+                        callback_data=f"start_search_in_category:{category_id}",
                     )
                 ]
             )
