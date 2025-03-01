@@ -327,9 +327,9 @@ class EcommerceDemo(Ecommerce):
 
     def get_categories(self, parent_category_id=None):
         if parent_category_id is None:
-            return categories
+            return self.categories
         else:
-            return [category for category in categories if category.parent_category_id == parent_category_id]
+            return [category for category in self.categories if category.parent_category_id == parent_category_id]
 
     def browse_products(self, q=None, category_id=None, limit=None):
         if category_id is None:
