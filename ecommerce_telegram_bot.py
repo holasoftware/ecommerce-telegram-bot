@@ -401,7 +401,7 @@ class EcommerceDemo(Ecommerce):
         return random.randint(1, 5)
 
     def get_product_by_id(self, product_id):
-        return self.products[product_id]
+        return self._products[product_id]
 
     def get_category_by_id(self, category_id):
         return self.categories[category_id]
