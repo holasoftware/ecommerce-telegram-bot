@@ -502,6 +502,7 @@ class EcommerceTelegramBot:
                     ]
                 },
                 fallbacks=[],
+                per_message=True
             )
         )
 
@@ -522,6 +523,7 @@ class EcommerceTelegramBot:
                     ]
                 },
                 fallbacks=[],
+                per_message=True
             )
         )
 
@@ -613,8 +615,8 @@ class EcommerceTelegramBot:
         return ConversationHandler.END
 
     async def _start(self, update: Update, context: CallbackContext) -> None:
-        if self._welcome_message is not None:
-            await update.message.reply_text(self._welcome_message)
+        if self.welcome_message is not None:
+            await update.message.reply_text(self.welcome_message)
 
         await self._show_main_menu(update, context)
 
