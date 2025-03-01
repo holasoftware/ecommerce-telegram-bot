@@ -234,8 +234,8 @@ class Ecommerce:
 
 
 class ShoppingCartDemo(ShoppingCart):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self._items = []
 
     def _find_item_by_product_id(self, product_id, variant_id=None):
@@ -666,12 +666,12 @@ class EcommerceTelegramBot:
         reply_markup = self.get_main_menu_reply_markup()
 
         if update.message:
-            await update.message.reply_text(_("Main Menu:"), reply_markup=reply_markup)
+            await update.message.reply_text(_("Main Menu"), reply_markup=reply_markup)
         elif update.callback_query:
             query = update.callback_query
             await query.answer()
 
-            await query.message.reply_text(_("Main Menu:"), reply_markup=reply_markup)
+            await query.message.reply_text(_("Main Menu"), reply_markup=reply_markup)
 
     async def _show_categories(self, update: Update, context: CallbackContext) -> None:
         if update.callback_query:
@@ -1204,7 +1204,7 @@ Recommend products based on the user's request:
             else:
                 if (
                     self.product_detail_image_view_type
-                    == ProductDetailImageViewType.IMAGE_GALLERY
+                    == self.ProductDetailImageViewType.IMAGE_GALLERY
                 ):
                     # Image gallery
                     media = [InputMediaPhoto(media=url) for url in product.image_urls]
