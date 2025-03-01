@@ -142,12 +142,21 @@ class ShoppingCart:
     def has_items(self):
         return not self.is_empty()
 
+    def calculate_item_total(self, item):
+        item_total = item.quantity * Decimal(item.price)
+
+        if item.product.discount:
+            item_total = item_total * (1 - item.product.discount)
+
+        return item_total
+
     def calculate_total(self):
         """Calculates the total price of the items in the user's cart."""
         cart_items = self.get_items()
         total = Decimal()
         for item in cart_items:
-            total += item.quantity * Decimal(item.price)
+            item_total = self.calculate_item_total(item)
+            total += item_total
         return total
 
     def get_summary(
@@ -167,15 +176,22 @@ class ShoppingCart:
 
         total_price = Decimal()
         for item in cart_items:
-            price = item.price
-            item_total = item.quantity * Decimal(price)
+            item_total = self.calculate_item_total(item)
 
             localized_item_total = localized_price_template.format(
                 currency_symbol=currency_symbol, price=item_total
             )
 
             total_price += item_total
-            summary += f"- {item.name} x{item.quantity} = {localized_item_total}\n"
+
+            if item.product.discount:
+                summary_row = (
+                    f"- {item.product.name} x{item.quantity} = {localized_item_total}\n"
+                )
+            else:
+                summary_row = f"- {item.product.name} x{item.quantity} = {localized_item_total}({item.product.discount * 100:.0f}% off)\n"
+
+            summary += summary_row
 
         localized_cart_total_price = localized_price_template.format(
             currency_symbol=currency_symbol, price=item_total
@@ -573,7 +589,7 @@ class EcommerceTelegramBot:
         )
         application.add_handler(
             CallbackQueryHandler(
-                self._add_one_item_to_cart_and_notify_message,
+                self._add_to_cart,
                 pattern=r"^add_one_item_to_cart_and_notify_message:",
             )
         )
@@ -680,6 +696,7 @@ class EcommerceTelegramBot:
 
         categories = self.ecommerce.get_categories()
 
+        # TODO: Show num products in each category
         keyboard = [
             [
                 InlineKeyboardButton(
@@ -774,23 +791,47 @@ class EcommerceTelegramBot:
             update=update, context=context, category_id=category_id
         )
 
-    async def _add_one_item_to_cart_and_notify_message(
-        self, update: Update, context: CallbackContext
-    ) -> None:
+    async def _add_to_cart(self, update: Update, context: CallbackContext) -> None:
         query = update.callback_query
         await query.answer()
 
         product_id = query.data.split(":")[1]
         product_id = int(product_id)
 
+        product = self.ecommerce.get_product_by_id(product_id)
+        product_category_id = product.category_id
+
+        category = self.ecommerce.get_category_by_id(product_category_id)
+        product_category_name = category.name
+
         user_id = query.from_user.id
 
         cart = self.ecommerce.get_cart(user_id)
         cart.add_item(product_id)
 
+        num_items_in_cart = len(cart)
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    _("Cart ({num_items_in_cart})").format(
+                        num_items_in_cart=num_items_in_cart
+                    ),
+                    callback_data=f"cart",
+                ),
+                InlineKeyboardButton(
+                    product_category_name,
+                    callback_data=f"category:{product_category_id}",
+                ),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         await query.message.reply_text(
             _("Product added to cart: #{product_id} {product_name}").format(
-                product_id=product.id, product_name=product.name
+                product_id=product.id,
+                product_name=product.name,
+                reply_markup=reply_markup,
             )
         )
 
@@ -1196,7 +1237,7 @@ Recommend products based on the user's request:
             f"*{product.name}*\n\n{product.description}\n\nPrice: {product.price}"
         )
 
-        if product.image_urls is not None and len(product.image_urls) != 0:
+        if product.image_urls is not None and len(product.image_urls) > 0:
             if len(product.image_urls) == 1:
                 await query.message.reply_photo(
                     photo=InputMediaPhoto(media=product.image_urls[0])
@@ -1208,6 +1249,7 @@ Recommend products based on the user's request:
                 ):
                     # Image gallery
                     media = [InputMediaPhoto(media=url) for url in product.image_urls]
+                    # await context.bot.send_media_group(media=media)
                     await query.message.reply_media_group(media=media)
                 else:
                     # Carousel
