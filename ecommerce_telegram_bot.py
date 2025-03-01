@@ -37,6 +37,8 @@ from telegram.ext import (
     ApplicationBuilder,
 )
 from telegram.constants import ParseMode
+from telegram.helpers import escape_markdown
+
 
 logger = logging.getLogger(__name__)
 
@@ -62,20 +64,29 @@ class Money:
     localized_price_template: str
 
     def format_price(self, price):
-        return self.localized_price_template.format(currency_symbol=self.currency_symbol, price=price)
+        return self.localized_price_template.format(
+            currency_symbol=self.currency_symbol, price=price
+        )
 
 
 money_locale = {
-    "us": Money(currency="USD", currency_symbol = "$", localized_price_template = "{currency_symbol}{price:.2f}")
+    "us": Money(
+        currency="USD",
+        currency_symbol="$",
+        localized_price_template="{currency_symbol}{price:.2f}",
+    )
 }
+
 
 @dataclass
 class CartItem:
     product_id: int
-    price: Decimal
+    name: str
+    unit_price: Decimal
     quantity: int
+    discount: float | None = None
     variant_id: int | None = None
-    
+
 
 @dataclass
 class CartSession:
@@ -159,10 +170,10 @@ class ShoppingCart:
         return not self.is_empty()
 
     def calculate_item_total(self, item):
-        item_total = item.quantity * Decimal(item.price)
+        item_total = item.quantity * Decimal(item.unit_price)
 
-        if item.product.discount:
-            item_total = item_total * (1 - item.product.discount)
+        if item.discount:
+            item_total = item_total * (1 - item.discount)
 
         return item_total
 
@@ -179,14 +190,14 @@ class ShoppingCart:
         self,
         summary_header=_("Your Cart:"),
         cart_empty_text=_("Your cart is empty."),
-        total_text=_("Total")
+        total_text=_("Total"),
     ):
         """Returns a string summary of the user's cart."""
         cart_items = self.get_items()
         if not cart_items:
             return cart_empty_text
 
-        money = self.ecommerce.get_money_locale(self._user_id)
+        money = self.ecommerce.get_money_locale(self.user_id)
 
         summary = summary_header + "\n"
 
@@ -194,16 +205,15 @@ class ShoppingCart:
         for item in cart_items:
             item_total = self.calculate_item_total(item)
 
+            localized_item_unit_price = money.format_price(item.unit_price)
             localized_item_total = money.format_price(item_total)
 
             total_price += item_total
 
-            if item.product.discount:
-                summary_row = (
-                    f"- {item.product.name} x{item.quantity} = {localized_item_total}\n"
-                )
+            if item.discount:
+                summary_row = f"- {item.name} ({localized_item_unit_price}) x{item.quantity} = {localized_item_total}({item.discount * 100:.0f}% off)\n"
             else:
-                summary_row = f"- {item.product.name} x{item.quantity} = {localized_item_total}({item.product.discount * 100:.0f}% off)\n"
+                summary_row = f"- {item.name} ({localized_item_unit_price}) x{item.quantity} = {localized_item_total}\n"
 
             summary += summary_row
 
@@ -213,7 +223,7 @@ class ShoppingCart:
         return summary
 
     def __iter__(self):
-        return self.get_items()
+        return iter(self.get_items())
 
     def __len__(self):
         return self.get_num_items()
@@ -265,9 +275,11 @@ class Ecommerce:
 
 
 class ShoppingCartDemo(ShoppingCart):
+    user_items = {}
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._items = []
+        self._items = self.user_items.setdefault(self.user_id, [])
 
     def _find_item_by_product_id(self, product_id, variant_id=None):
         for i, item in enumerate(self._items):
@@ -281,16 +293,17 @@ class ShoppingCartDemo(ShoppingCart):
             product_id, variant_id=variant_id
         )
 
-        product = self.ecommerce.get_product(product_id)
-        product_price = product.price
-
         if found:
             item.quantity += quantity
         else:
+            product = self.ecommerce.get_product(product_id)
+
             item = CartItem(
                 product_id=product_id,
+                name=product.name,
                 quantity=quantity,
-                price=product_price,
+                unit_price=product.price,
+                discount=product.discount,
                 variant_id=variant_id,
             )
             self._items.append(item)
@@ -473,6 +486,10 @@ class EcommerceTelegramBot:
         product_detail_image_view_type=ProductDetailImageViewType.MAIN_PHOTO,
         welcome_message=_("Welcome to ecommerce bot!"),
     ):
+
+        if not token:
+            raise Exception("Telegram token is required")
+
         self.token = token
         self.llm_model = llm_model
         self.llm_temperature = llm_temperature
@@ -604,24 +621,23 @@ class EcommerceTelegramBot:
         application.add_handler(CallbackQueryHandler(self._show_cart, pattern=r"^cart"))
         application.add_handler(
             CallbackQueryHandler(
-                self._remove_one_item_from_cart, pattern=r"^remove_one_item_from_cart:"
+                self._remove_one_product_from_cart,
+                pattern=r"^remove_one_product_from_cart:",
             )
         )
         application.add_handler(
             CallbackQueryHandler(
-                self._add_one_item_to_cart, pattern=r"^add_one_item_to_cart:"
+                self._add_one_product_to_cart, pattern=r"^add_one_product_to_cart:"
             )
         )
         application.add_handler(
             CallbackQueryHandler(
                 self._add_to_cart,
-                pattern=r"^add_one_item_to_cart_and_notify_message:",
+                pattern=r"^add_one_product_to_cart_and_notify_message:",
             )
         )
         application.add_handler(
-            CallbackQueryHandler(
-                self._remove_product_from_cart, pattern=r"^remove_product_from_cart:"
-            )
+            CallbackQueryHandler(self._remove_cart_item, pattern=r"^remove_cart_item:")
         )
 
     async def _start_search_command_handler(
@@ -678,10 +694,14 @@ class EcommerceTelegramBot:
         await self._show_main_menu(update, context)
 
     async def _show_orders(self, update: Update, context: CallbackContext) -> None:
-        pass
+        if update.callback_query:
+            query = update.callback_query
+            await query.answer()
 
     async def _show_account(self, update: Update, context: CallbackContext) -> None:
-        pass
+        if update.callback_query:
+            query = update.callback_query
+            await query.answer()
 
     def get_main_menu_reply_markup(self):
         keyboard = [
@@ -712,7 +732,9 @@ class EcommerceTelegramBot:
             query = update.callback_query
             await query.answer()
 
-            await query.message.reply_text(_("Main Menu"), reply_markup=reply_markup)
+            await query._get_message().reply_text(
+                _("Main Menu"), reply_markup=reply_markup
+            )
 
     async def _show_categories(self, update: Update, context: CallbackContext) -> None:
         if update.callback_query:
@@ -842,7 +864,7 @@ class EcommerceTelegramBot:
                     _("Cart ({num_items_in_cart})").format(
                         num_items_in_cart=num_items_in_cart
                     ),
-                    callback_data=f"cart",
+                    callback_data="cart",
                 ),
                 InlineKeyboardButton(
                     product_category_name,
@@ -853,37 +875,42 @@ class EcommerceTelegramBot:
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.message.reply_text(
-            _("Product added to cart: #{product_id} {product_name}").format(
-                product_id=product.id,
+            _("Product added to cart: {product_name}").format(
                 product_name=product.name,
                 reply_markup=reply_markup,
             )
         )
 
-    async def get_cart_item_message_kwargs(self, item):
+    def create_cart_item_inline_keyboard(self, product_id):
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "+", callback_data=f"add_one_product_to_cart:{product_id}"
+                ),
+                InlineKeyboardButton(
+                    "-", callback_data=f"remove_one_product_from_cart:{product_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    _("Remove"), callback_data=f"remove_cart_item:{product_id}"
+                ),
+            ],
+        ]
+
+        return keyboard
+
+    def get_cart_item_message_kwargs(self, item):
         product_id = item.product_id
 
         product = self.ecommerce.get_product(product_id)
 
-        reply_markup = self.create_cart_item_inline_keyboard(product.id)
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "+", callback_data=f"add_one_item_to_cart:{product_id}"
-                ),
-                InlineKeyboardButton(
-                    "-", callback_data=f"remove_one_item_from_cart:{product_id}"
-                ),
-                InlineKeyboardButton(
-                    _("Remove"), callback_data=f"remove_product_from_cart:{product_id}"
-                ),
-            ]
-        ]
+        keyboard = self.create_cart_item_inline_keyboard(product.id)
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         return {
-            "text": "#{product_id} {product_name}: {quantity}".format(
-                product_id=product.id, product_name=product.name, quantity=item.quantity
+            "text": "{product_name} ({quantity})\n".format(
+                product_name=product.name, quantity=item.quantity
             ),
             "reply_markup": reply_markup,
         }
@@ -891,7 +918,7 @@ class EcommerceTelegramBot:
     async def edit_cart_item_message(self, query, item):
         await query.edit_message_text(**self.get_cart_item_message_kwargs(item))
 
-    async def _add_one_item_to_cart(
+    async def _add_one_product_to_cart(
         self, update: Update, context: CallbackContext
     ) -> None:
         query = update.callback_query
@@ -907,7 +934,7 @@ class EcommerceTelegramBot:
 
         await self.edit_cart_item_message(query, item)
 
-    async def _remove_one_item_from_cart(
+    async def _remove_one_product_from_cart(
         self, update: Update, context: CallbackContext
     ) -> None:
         query = update.callback_query
@@ -925,9 +952,7 @@ class EcommerceTelegramBot:
         else:
             await self.edit_cart_item_message(query, item)
 
-    async def _remove_product_from_cart(
-        self, update: Update, context: CallbackContext
-    ) -> None:
+    async def _remove_cart_item(self, update: Update, context: CallbackContext) -> None:
         query = update.callback_query
         await query.answer()
 
@@ -941,30 +966,53 @@ class EcommerceTelegramBot:
         await query.delete_message()
 
         if product_found:
-            await query.message.reply_text(_("Item removed from cart."))
+            answer = _("Item removed from cart.")
         else:
-            await query.message.reply_text(_("Item not found in cart."))
+            answer = _("Item not found in cart.")
+
+        await query._get_message().reply_text(answer)
 
     async def _show_checkout(self, update: Update, context: CallbackContext) -> None:
         query = update.callback_query
         await query.answer()
 
         user_id = query.from_user.id
+        message = query._get_message()
 
         cart = self.ecommerce.get_cart(user_id)
 
         if len(cart) == 0:
-            update.message.reply_text(_("Your cart is empty. Nothing to checkout."))
+            message.reply_text(_("Your cart is empty. Nothing to checkout."))
             await self._show_main_menu(update, context)
             return
 
-        cart_summary = cart.get_summary(summary_header=_("Checkout Summary:"))
-        await update.message.reply_text(cart_summary)
+        checkout_header_text = _("Checkout Summary")
+        checkout_header = (
+            ("-" * len(checkout_header_text))
+            + "\n"
+            + checkout_header_text
+            + "\n"
+            + ("-" * len(checkout_header_text))
+            + "\n"
+        )
+        cart_summary = cart.get_summary(summary_header=checkout_header)
 
-        keyboard = [[InlineKeyboardButton(_("Pay Now"), callback_data="pay_now")]]
+        message_text = (
+            "`"
+            + escape_markdown(cart_summary)
+            + "`"
+            + "\n\n\n\n"
+            + _("Proceed to payment?")
+            + "\n"
+        )
+
+        keyboard = [
+            [InlineKeyboardButton(_("Pay Now"), callback_data="pay_now")],
+            [InlineKeyboardButton(_("Back to Cart"), callback_data="cart")],
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            _("Proceed to payment?"), reply_markup=reply_markup
+        await message.reply_text(
+            message_text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN
         )
 
         # keyboard = [[InlineKeyboardButton('Confirm Checkout', callback_data='confirm_checkout')]]
@@ -977,7 +1025,7 @@ class EcommerceTelegramBot:
             await query.answer()
 
             user_id = query.from_user.id
-            message = query.message
+            message = query._get_message()
         else:
             user_id = update.effective_user.id
             message = update.message
@@ -992,12 +1040,9 @@ class EcommerceTelegramBot:
         for cart_item in cart_items:
             await message.reply_text(**self.get_cart_item_message_kwargs(cart_item))
 
-
         keyboard = [[InlineKeyboardButton(_("Check Out"), callback_data="checkout")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            _("Proceed to checkout?"), reply_markup=reply_markup
-        )
+        await message.reply_text(_("Proceed to checkout?"), reply_markup=reply_markup)
 
     # def confirm_checkout(update: Update, context: CallbackContext) -> None:
     async def _pay_now(self, update: Update, context: CallbackContext) -> None:
@@ -1013,13 +1058,13 @@ class EcommerceTelegramBot:
         query = update.callback_query
         await query.answer()
 
-        user_id = update.effective_user.id
+        user_id = query.from_user.id
 
         cart = self.ecommerce.get_cart(user_id)
 
         if len(cart) == 0:
             # query.message.reply_text('Cart is empty.')
-            await query.message.reply_text(_("Your cart is empty."))
+            await query._get_message().reply_text(_("Your cart is empty."))
             return
 
         total = Decimal()
@@ -1259,14 +1304,16 @@ Recommend products based on the user's request:
 
         product = self.ecommerce.get_product(product_id)
         if product is None:
-            await context.bot.send_text(
-                _("Product does not exist: #{product_id}").format(product_id=product_id),
-                chat_id=query.message.chat_id
+            await query.reply_text(
+                _("Product does not exist: #{product_id}").format(
+                    product_id=product_id
+                ),
+                chat_id=query.message.chat_id,
             )
             return
 
-
         user_id = query.from_user.id
+        chat_id = query.message.chat_id
         money = self.ecommerce.get_money_locale(user_id)
 
         localized_price = money.format_price(product.price)
@@ -1282,7 +1329,7 @@ Recommend products based on the user's request:
                 [
                     InlineKeyboardButton(
                         _("Add to Cart"),
-                        callback_data=f"add_one_item_to_cart_and_notify_message:{product_id}",
+                        callback_data=f"add_one_product_to_cart_and_notify_message:{product_id}",
                     )
                 ],
                 [
@@ -1297,14 +1344,18 @@ Recommend products based on the user's request:
         )
 
         if product.image_urls is not None and len(product.image_urls) > 0:
-            if self.product_detail_image_view_type == self.ProductDetailImageViewType.MAIN_PHOTO or len(product.image_urls) == 1:
+            if (
+                self.product_detail_image_view_type
+                == self.ProductDetailImageViewType.MAIN_PHOTO
+                or len(product.image_urls) == 1
+            ):
 
                 await context.bot.send_photo(
                     photo=product.image_urls[0],
                     caption=product_text,
                     reply_markup=product_reply_markup,
                     parse_mode=ParseMode.MARKDOWN,
-                    chat_id=query.message.chat_id
+                    chat_id=chat_id,
                 )
             else:
                 if (
@@ -1322,32 +1373,34 @@ Recommend products based on the user's request:
                     await context.bot.send_photo(
                         photo=product.image_urls[0],
                         reply_markup=carousel_reply_markup,
-                        chat_id=query.message.chat_id
+                        chat_id=chat_id,
                     )
 
                 await context.bot.send_text(
                     product_text,
                     reply_markup=product_reply_markup,
                     parse_mode=ParseMode.MARKDOWN,
-                    chat_id=query.message.chat_id
+                    chat_id=chat_id,
                 )
-        else:        
+        else:
             await context.bot.send_text(
                 product_text,
                 reply_markup=product_reply_markup,
                 parse_mode=ParseMode.MARKDOWN,
-                chat_id=query.message.chat_id
+                chat_id=chat_id,
             )
 
     async def _post_init(self, application: ApplicationBuilder):
         bot = application.bot
         await bot.set_my_commands(
             [
+                BotCommand("main_menu", _("Main menu")),
                 BotCommand("account", _("Account")),
                 BotCommand("categories", _("Categories")),
                 BotCommand("orders", _("Orders")),
                 BotCommand("cart", _("Cart")),
                 BotCommand("search", _("Search")),
+                BotCommand("recommendations", _("Recommendations")),
             ]
         )
 
