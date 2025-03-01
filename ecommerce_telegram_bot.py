@@ -79,7 +79,7 @@ class ProductVariant:
 class ProductCategory:
     id: int
     name: str
-    parent_product_id: int | None = None
+    parent_category_id: int | None = None
     product_ids: list[int] | None = None
     subcategory_ids: list[int] | None = None
 
@@ -309,13 +309,13 @@ class EcommerceDemo(Ecommerce):
         ProductCategory(name="Clothing", id=1, subcategory_ids=[6, 7, 8]),
         ProductCategory(name="Books", id=2, subcategory_ids=[9, 10]),
         ProductCategory(name="Home & Kitchen", id=3),
-        ProductCategory(name="Laptops", id=4, parent_product_id=0),
-        ProductCategory(name="Smartphones", id=5, parent_product_id=0),
-        ProductCategory(name="T-shirts", id=6, parent_product_id=1),
-        ProductCategory(name="Jeans", id=7, parent_product_id=1),
-        ProductCategory(name="Caps", id=8, parent_product_id=1),
-        ProductCategory(name="Fiction", id=9, parent_product_id=2),
-        ProductCategory(name="Non-fiction", id=10, parent_product_id=2),
+        ProductCategory(name="Laptops", id=4, parent_category_id=0),
+        ProductCategory(name="Smartphones", id=5, parent_category_id=0),
+        ProductCategory(name="T-shirts", id=6, parent_category_id=1),
+        ProductCategory(name="Jeans", id=7, parent_category_id=1),
+        ProductCategory(name="Caps", id=8, parent_category_id=1),
+        ProductCategory(name="Fiction", id=9, parent_category_id=2),
+        ProductCategory(name="Non-fiction", id=10, parent_category_id=2),
     ]
 
     def __init__(self):
@@ -324,6 +324,12 @@ class EcommerceDemo(Ecommerce):
         self._products_in_category = []
 
         self._generate_demo_data()
+
+    def get_categories(self, parent_category_id=None):
+        if parent_category_id is None:
+            return categories
+        else:
+            return [category for category in categories if category.parent_category_id == parent_category_id]
 
     def browse_products(self, q=None, category_id=None, limit=None):
         if category_id is None:
