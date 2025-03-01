@@ -79,7 +79,7 @@ class ProductVariant:
 class ProductCategory:
     id: int
     name: str
-    parent_category_id: int | None = None
+    parent_id: int | None = None
     product_ids: list[int] | None = None
     subcategory_ids: list[int] | None = None
 
@@ -220,7 +220,10 @@ class Ecommerce:
     def get_product_by_id(self, product_id):
         raise NotImplementedError
 
-    def get_categories(self, parent_category_id=None):
+    def get_category_by_id(self, category_id):
+        raise NotImplementedError
+
+    def get_categories(self, parent_id=None):
         raise NotImplementedError
 
     def get_cart(self, user_id):
@@ -309,13 +312,13 @@ class EcommerceDemo(Ecommerce):
         ProductCategory(name="Clothing", id=1, subcategory_ids=[6, 7, 8]),
         ProductCategory(name="Books", id=2, subcategory_ids=[9, 10]),
         ProductCategory(name="Home & Kitchen", id=3),
-        ProductCategory(name="Laptops", id=4, parent_category_id=0),
-        ProductCategory(name="Smartphones", id=5, parent_category_id=0),
-        ProductCategory(name="T-shirts", id=6, parent_category_id=1),
-        ProductCategory(name="Jeans", id=7, parent_category_id=1),
-        ProductCategory(name="Caps", id=8, parent_category_id=1),
-        ProductCategory(name="Fiction", id=9, parent_category_id=2),
-        ProductCategory(name="Non-fiction", id=10, parent_category_id=2),
+        ProductCategory(name="Laptops", id=4, parent_id=0),
+        ProductCategory(name="Smartphones", id=5, parent_id=0),
+        ProductCategory(name="T-shirts", id=6, parent_id=1),
+        ProductCategory(name="Jeans", id=7, parent_id=1),
+        ProductCategory(name="Caps", id=8, parent_id=1),
+        ProductCategory(name="Fiction", id=9, parent_id=2),
+        ProductCategory(name="Non-fiction", id=10, parent_id=2),
     ]
 
     def __init__(self):
@@ -325,11 +328,15 @@ class EcommerceDemo(Ecommerce):
 
         self._generate_demo_data()
 
-    def get_categories(self, parent_category_id=None):
-        if parent_category_id is None:
+    def get_categories(self, parent_id=None):
+        if parent_id is None:
             return self.categories
         else:
-            return [category for category in self.categories if category.parent_category_id == parent_category_id]
+            return [
+                category
+                for category in self.categories
+                if category.parent_id == parent_id
+            ]
 
     def browse_products(self, q=None, category_id=None, limit=None):
         if category_id is None:
@@ -395,6 +402,9 @@ class EcommerceDemo(Ecommerce):
 
     def get_product_by_id(self, product_id):
         return self.products[product_id]
+
+    def get_category_by_id(self, category_id):
+        return self.categories[category_id]
 
 
 # TODO: 2 modes 'command' mode and 'search' mode. The default mode is 'search' mode
@@ -508,7 +518,7 @@ class EcommerceTelegramBot:
                     ]
                 },
                 fallbacks=[],
-                per_message=True
+                per_message=True,
             )
         )
 
@@ -529,7 +539,7 @@ class EcommerceTelegramBot:
                     ]
                 },
                 fallbacks=[],
-                per_message=True
+                per_message=True,
             )
         )
 
@@ -702,6 +712,8 @@ class EcommerceTelegramBot:
         category_id = query.data.split(":")[1]
         category_id = int(category_id)
 
+        category = self.ecommerce.get_category_by_id(category_id)
+
         product_list = self.ecommerce.browse_products(category_id=category_id)
 
         if product_list:
@@ -730,7 +742,9 @@ class EcommerceTelegramBot:
             )
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
-                _("Products in {category_id}:").format(category_id=category_id),
+                _("Products in category {category_name}:").format(
+                    category_name=category.name
+                ),
                 reply_markup=reply_markup,
             )
         else:
