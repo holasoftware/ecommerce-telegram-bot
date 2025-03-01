@@ -36,6 +36,7 @@ from telegram.ext import (
     ConversationHandler,
     ApplicationBuilder,
 )
+from telegram.constants import ParseMode
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +56,26 @@ def _(text):
 
 
 @dataclass
+class Money:
+    currency: str
+    currency_symbol: str
+    localized_price_template: str
+
+    def format_price(self, price):
+        return self.localized_price_template.format(currency_symbol=self.currency_symbol, price=price)
+
+
+money_locale = {
+    "us": Money(currency="USD", currency_symbol = "$", localized_price_template = "{currency_symbol}{price:.2f}")
+}
+
+@dataclass
 class CartItem:
     product_id: int
+    price: Decimal
     quantity: int
-    product_variant_id: int | None = None
-
+    variant_id: int | None = None
+    
 
 @dataclass
 class CartSession:
@@ -163,14 +179,14 @@ class ShoppingCart:
         self,
         summary_header=_("Your Cart:"),
         cart_empty_text=_("Your cart is empty."),
-        total_text=_("Total"),
-        currency_symbol="$",
-        localized_price_template="{currency_symbol}{price:.2f}",
+        total_text=_("Total")
     ):
         """Returns a string summary of the user's cart."""
         cart_items = self.get_items()
         if not cart_items:
             return cart_empty_text
+
+        money = self.ecommerce.get_money_locale(self._user_id)
 
         summary = summary_header + "\n"
 
@@ -178,9 +194,7 @@ class ShoppingCart:
         for item in cart_items:
             item_total = self.calculate_item_total(item)
 
-            localized_item_total = localized_price_template.format(
-                currency_symbol=currency_symbol, price=item_total
-            )
+            localized_item_total = money.format_price(item_total)
 
             total_price += item_total
 
@@ -193,9 +207,7 @@ class ShoppingCart:
 
             summary += summary_row
 
-        localized_cart_total_price = localized_price_template.format(
-            currency_symbol=currency_symbol, price=item_total
-        )
+        localized_cart_total_price = money.format_price(total_price)
 
         summary += "\n" + total_text + ": " + localized_cart_total_price
         return summary
@@ -225,7 +237,10 @@ class Ecommerce:
     """
 
     shopping_cart_class = ShoppingCart
-    currency = "USD"
+    default_locale = "us"
+
+    def get_money_locale(self, user_id=None):
+        return money_locale[self.default_locale]
 
     def browse_products(self, q=None, category_id=None, limit=None):
         raise NotImplementedError
@@ -233,20 +248,20 @@ class Ecommerce:
     def get_all_products(self):
         return self.browse_products()
 
-    def get_product_by_id(self, product_id):
+    def get_product(self, product_id):
         raise NotImplementedError
 
-    def get_category_by_id(self, category_id):
+    def get_category(self, category_id):
         raise NotImplementedError
 
     def get_categories(self, parent_id=None):
         raise NotImplementedError
 
     def get_cart(self, user_id):
-        raise self.shopping_cart_class(self, user_id)
+        return self.shopping_cart_class(self, user_id)
 
     def get_currency(self):
-        return self.currency
+        return self.get_money_locale().currency
 
 
 class ShoppingCartDemo(ShoppingCart):
@@ -266,13 +281,16 @@ class ShoppingCartDemo(ShoppingCart):
             product_id, variant_id=variant_id
         )
 
+        product = self.ecommerce.get_product(product_id)
+        product_price = product.price
+
         if found:
             item.quantity += quantity
         else:
             item = CartItem(
                 product_id=product_id,
                 quantity=quantity,
-                price=price,
+                price=product_price,
                 variant_id=variant_id,
             )
             self._items.append(item)
@@ -305,11 +323,14 @@ class ShoppingCartDemo(ShoppingCart):
         else:
             return False
 
+    def get_items(self):
+        return self._items
+
     def clear(self):
         self._items = []
 
     def get_num_items(self):
-        raise len(self._items)
+        return len(self._items)
 
     def has_product_by_id(self, product_id):
         found, _, _ = self._find_item_by_product_id(product_id)
@@ -404,9 +425,9 @@ class EcommerceDemo(Ecommerce):
                         category_id=category_id,
                         name="Product %d" % product_id,
                         image_urls=[
-                            "https://placehold.co/150",
-                            "https://placehold.co/200",
-                            "https://placehold.co/250",
+                            "https://fakeimg.pl/150",
+                            "https://fakeimg.pl/200",
+                            "https://fakeimg.pl/250",
                         ],
                         description="This is product %d." % product_id,
                         price=round(random.uniform(1, 1000), 1),
@@ -416,10 +437,10 @@ class EcommerceDemo(Ecommerce):
     def _get_random_num_products_in_category(self):
         return random.randint(1, 5)
 
-    def get_product_by_id(self, product_id):
+    def get_product(self, product_id):
         return self._products[product_id]
 
-    def get_category_by_id(self, category_id):
+    def get_category(self, category_id):
         return self.categories[category_id]
 
 
@@ -433,6 +454,7 @@ class EcommerceTelegramBot:
     class ProductDetailImageViewType(Enum):
         IMAGE_GALLERY = auto()
         CAROUSEL = auto()
+        MAIN_PHOTO = auto()
 
     def __init__(
         self,
@@ -448,8 +470,8 @@ class EcommerceTelegramBot:
         payment_need_phone_number=True,
         payment_need_email=True,
         product_specification_separator="\n\n--------------------\n\n",
-        product_detail_image_view_type=ProductDetailImageViewType.IMAGE_GALLERY,
-        welcome_message=_("Welcome to ecommerce bot"),
+        product_detail_image_view_type=ProductDetailImageViewType.MAIN_PHOTO,
+        welcome_message=_("Welcome to ecommerce bot!"),
     ):
         self.token = token
         self.llm_model = llm_model
@@ -511,6 +533,9 @@ class EcommerceTelegramBot:
         )
         application.add_handler(
             CallbackQueryHandler(self._pay_now, pattern=r"^pay_now$")
+        )
+        application.add_handler(
+            CallbackQueryHandler(self._show_checkout, pattern=r"^checkout$")
         )
         application.add_handler(PreCheckoutQueryHandler(self._pre_checkout_query))
         application.add_handler(
@@ -729,7 +754,7 @@ class EcommerceTelegramBot:
         category_id = query.data.split(":")[1]
         category_id = int(category_id)
 
-        category = self.ecommerce.get_category_by_id(category_id)
+        category = self.ecommerce.get_category(category_id)
 
         product_list = self.ecommerce.browse_products(category_id=category_id)
 
@@ -798,10 +823,10 @@ class EcommerceTelegramBot:
         product_id = query.data.split(":")[1]
         product_id = int(product_id)
 
-        product = self.ecommerce.get_product_by_id(product_id)
+        product = self.ecommerce.get_product(product_id)
         product_category_id = product.category_id
 
-        category = self.ecommerce.get_category_by_id(product_category_id)
+        category = self.ecommerce.get_category(product_category_id)
         product_category_name = category.name
 
         user_id = query.from_user.id
@@ -838,7 +863,7 @@ class EcommerceTelegramBot:
     async def get_cart_item_message_kwargs(self, item):
         product_id = item.product_id
 
-        product = self.ecommerce.get_product_by_id(product_id)
+        product = self.ecommerce.get_product(product_id)
 
         reply_markup = self.create_cart_item_inline_keyboard(product.id)
         keyboard = [
@@ -966,6 +991,13 @@ class EcommerceTelegramBot:
 
         for cart_item in cart_items:
             await message.reply_text(**self.get_cart_item_message_kwargs(cart_item))
+
+
+        keyboard = [[InlineKeyboardButton(_("Check Out"), callback_data="checkout")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            _("Proceed to checkout?"), reply_markup=reply_markup
+        )
 
     # def confirm_checkout(update: Update, context: CallbackContext) -> None:
     async def _pay_now(self, update: Update, context: CallbackContext) -> None:
@@ -1202,7 +1234,7 @@ Recommend products based on the user's request:
             0, min(product_image_index, len(product.image_urls) - 1)
         )  # Ensure index is in range.
 
-        product = self.ecommerce.get_product_by_id(product_id)
+        product = self.ecommerce.get_product(product_id)
         if product is None:
             await query.message.reply_text(
                 _("Product does not exist: #{product_id}").format(product_id=product_id)
@@ -1225,47 +1257,31 @@ Recommend products based on the user's request:
         product_id = query.data.split(":")[1]
         product_id = int(product_id)
 
-        product = self.ecommerce.get_product_by_id(product_id)
+        product = self.ecommerce.get_product(product_id)
         if product is None:
-            await query.message.reply_text(
-                _("Product does not exist: #{product_id}").format(product_id=product_id)
+            await context.bot.send_text(
+                _("Product does not exist: #{product_id}").format(product_id=product_id),
+                chat_id=query.message.chat_id
             )
             return
 
+
+        user_id = query.from_user.id
+        money = self.ecommerce.get_money_locale(user_id)
+
+        localized_price = money.format_price(product.price)
+
         # TODO: Show category breadcrumb
+        # TODO: Show num products in stock
         product_text = (
-            f"*{product.name}*\n\n{product.description}\n\nPrice: {product.price}"
+            f"*{product.name}*\n\n{product.description}\n\nPrice: {localized_price}"
         )
 
-        if product.image_urls is not None and len(product.image_urls) > 0:
-            if len(product.image_urls) == 1:
-                await query.message.reply_photo(
-                    photo=InputMediaPhoto(media=product.image_urls[0])
-                )
-            else:
-                if (
-                    self.product_detail_image_view_type
-                    == self.ProductDetailImageViewType.IMAGE_GALLERY
-                ):
-                    # Image gallery
-                    media = [InputMediaPhoto(media=url) for url in product.image_urls]
-                    # await context.bot.send_media_group(media=media)
-                    await query.message.reply_media_group(media=media)
-                else:
-                    # Carousel
-                    reply_markup = self.create_product_carousel_inline_markup(
-                        product, 0
-                    )
-                    await query.message.reply_photo(
-                        photo=InputMediaPhoto(media=product.image_urls[0]),
-                        reply_markup=reply_markup,
-                    )
-
-        reply_markup = InlineKeyboardMarkup(
+        product_reply_markup = InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton(
-                        _("Add to cart"),
+                        _("Add to Cart"),
                         callback_data=f"add_one_item_to_cart_and_notify_message:{product_id}",
                     )
                 ],
@@ -1280,11 +1296,48 @@ Recommend products based on the user's request:
             ]
         )
 
-        await query.message.reply_text(
-            product_text,
-            reply_markup=reply_markup,
-            parse_mode=telegram.ParseMode.MARKDOWN,
-        )
+        if product.image_urls is not None and len(product.image_urls) > 0:
+            if self.product_detail_image_view_type == self.ProductDetailImageViewType.MAIN_PHOTO or len(product.image_urls) == 1:
+
+                await context.bot.send_photo(
+                    photo=product.image_urls[0],
+                    caption=product_text,
+                    reply_markup=product_reply_markup,
+                    parse_mode=ParseMode.MARKDOWN,
+                    chat_id=query.message.chat_id
+                )
+            else:
+                if (
+                    self.product_detail_image_view_type
+                    == self.ProductDetailImageViewType.IMAGE_GALLERY
+                ):
+                    # Image gallery
+                    media = [InputMediaPhoto(media=url) for url in product.image_urls]
+                    await context.bot.send_media_group(media=media)
+                else:
+                    # Carousel
+                    carousel_reply_markup = self.create_product_carousel_inline_markup(
+                        product, 0
+                    )
+                    await context.bot.send_photo(
+                        photo=product.image_urls[0],
+                        reply_markup=carousel_reply_markup,
+                        chat_id=query.message.chat_id
+                    )
+
+                await context.bot.send_text(
+                    product_text,
+                    reply_markup=product_reply_markup,
+                    parse_mode=ParseMode.MARKDOWN,
+                    chat_id=query.message.chat_id
+                )
+        else:        
+            await context.bot.send_text(
+                product_text,
+                reply_markup=product_reply_markup,
+                parse_mode=ParseMode.MARKDOWN,
+                chat_id=query.message.chat_id
+            )
 
     async def _post_init(self, application: ApplicationBuilder):
         bot = application.bot
