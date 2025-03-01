@@ -375,9 +375,9 @@ class EcommerceDemo(Ecommerce):
                         category_id=category_id,
                         name="Product %d" % product_id,
                         image_urls=[
-                            "https://via.placeholder.com/150",
-                            "https://via.placeholder.com/200",
-                            "https://via.placeholder.com/250",
+                            "https://placehold.co/150",
+                            "https://placehold.co/200",
+                            "https://placehold.co/250",
                         ],
                         description="This is product %d." % product_id,
                         price=round(random.uniform(1, 1000), 1),
