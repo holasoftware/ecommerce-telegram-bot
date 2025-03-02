@@ -57,6 +57,14 @@ def _(text):
     return translations.get(LANGUAGE_CODE, {}).get(text, text)
 
 
+def md_bold(text):
+    return "*" + text + "*"
+
+
+def md_monospace_font(text):
+    return "`" + text + "`"
+
+
 @dataclass
 class Money:
     currency: str
@@ -138,15 +146,15 @@ class ShoppingCart:
     def get_items(self):
         raise NotImplementedError
 
-    def add_item(self, product_id, quantity=1):
+    def add_product(self, product_id, quantity=1):
         """Adds a product to the user's cart."""
         raise NotImplementedError
 
-    def remove_item(self, product_id, quantity=1):
+    def remove_product(self, product_id, quantity=1):
         """Removes a product from the user's cart by its product ID."""
         raise NotImplementedError
 
-    def remove_all_items_of_product(self, product_id):
+    def remove_item(self, product_id):
         """Removes a product from the user's cart by its product ID."""
         raise NotImplementedError
 
@@ -168,6 +176,9 @@ class ShoppingCart:
 
     def has_items(self):
         return not self.is_empty()
+
+    def get_num_products(self):
+        return sum([item.quantity for item in self.get_items()])
 
     def calculate_item_total(self, item):
         item_total = item.quantity * Decimal(item.unit_price)
@@ -226,7 +237,7 @@ class ShoppingCart:
         return iter(self.get_items())
 
     def __len__(self):
-        return self.get_num_items()
+        return self.get_num_products()
 
     def __contains__(self, product):
         if isinstance(product, Product):
@@ -283,12 +294,12 @@ class ShoppingCartDemo(ShoppingCart):
 
     def _find_item_by_product_id(self, product_id, variant_id=None):
         for i, item in enumerate(self._items):
-            if item.product_id == product_id:
+            if item.product_id == product_id and item.variant_id == variant_id:
                 return True, i, item
 
         return False, None, None
 
-    def add_item(self, product_id, quantity=1, variant_id=None):
+    def add_product(self, product_id, quantity=1, variant_id=None):
         found, item_index, item = self._find_item_by_product_id(
             product_id, variant_id=variant_id
         )
@@ -310,14 +321,14 @@ class ShoppingCartDemo(ShoppingCart):
 
         return item
 
-    def remove_item(self, product_id, quantity=1, variant_id=None):
+    def remove_product(self, product_id, quantity=1, variant_id=None):
         found, item_index, item = self._find_item_by_product_id(
             product_id, variant_id=variant_id
         )
 
         if found:
             if item.quantity <= quantity:
-                self._items = self._items[:item_index] + self._items[item_index + 1 :]
+                del self._items[item_index]
             else:
                 item.quantity -= quantity
 
@@ -326,12 +337,13 @@ class ShoppingCartDemo(ShoppingCart):
         else:
             return False
 
-    def remove_all_items_of_product(self, product_id):
+    def remove_item(self, product_id, variant_id=None):
         found, item_index, item = self._find_item_by_product_id(
             product_id, variant_id=variant_id
         )
+
         if found:
-            self._items = self._items[:item_index] + self._items[item_index + 1 :]
+            del self._items[item_index]
             return True
         else:
             return False
@@ -478,6 +490,7 @@ class EcommerceTelegramBot:
         llm_model="gpt-3.5-turbo",
         llm_temperature=0.7,
         language="en",
+        main_menu_title=_("Main Menu"),
         payment_need_name=True,
         payment_need_shipping_address=True,
         payment_need_phone_number=True,
@@ -506,6 +519,8 @@ class EcommerceTelegramBot:
         self.currency = ecommerce.get_currency()
         self.ecommerce = ecommerce
         self.welcome_message = welcome_message
+
+        self.main_menu_title = main_menu_title
 
         self.product_detail_image_view_type = product_detail_image_view_type
 
@@ -538,6 +553,20 @@ class EcommerceTelegramBot:
         )
         application.add_handler(
             CallbackQueryHandler(self._show_orders, pattern=r"^orders$")
+        )
+        application.add_handler(
+            CallbackQueryHandler(
+                self._show_categories_in_new_message,
+                pattern=r"^show_categories_in_new_message$",
+            )
+        )
+        application.add_handler(
+            CallbackQueryHandler(self._show_main_menu, pattern=r"^main_menu$")
+        )
+        application.add_handler(
+            CallbackQueryHandler(
+                self._show_main_menu, pattern=r"^main_menu_in_new_message$"
+            )
         )
         application.add_handler(
             CallbackQueryHandler(self._show_categories, pattern=r"^categories$")
@@ -691,7 +720,7 @@ class EcommerceTelegramBot:
         if self.welcome_message is not None:
             await update.message.reply_text(self.welcome_message)
 
-        await self._show_main_menu(update, context)
+        await self._show_main_menu(update, context, edit_previous_message=False)
 
     async def _show_orders(self, update: Update, context: CallbackContext) -> None:
         if update.callback_query:
@@ -723,20 +752,36 @@ class EcommerceTelegramBot:
 
         return reply_markup
 
-    async def _show_main_menu(self, update: Update, context: CallbackContext) -> None:
+    async def _show_main_menu(
+        self, update: Update, context: CallbackContext, edit_previous_message=True
+    ) -> None:
         reply_markup = self.get_main_menu_reply_markup()
 
         if update.message:
-            await update.message.reply_text(_("Main Menu"), reply_markup=reply_markup)
+            await update.message.reply_text(
+                self.main_menu_title, reply_markup=reply_markup
+            )
         elif update.callback_query:
             query = update.callback_query
             await query.answer()
 
-            await query._get_message().reply_text(
-                _("Main Menu"), reply_markup=reply_markup
-            )
+            if edit_previous_message:
+                await query.edit_message_text(
+                    self.main_menu_title, reply_markup=reply_markup
+                )
+            else:
+                await query._get_message().reply_text(
+                    self.main_menu_title, reply_markup=reply_markup
+                )
 
-    async def _show_categories(self, update: Update, context: CallbackContext) -> None:
+    async def _show_main_menu_in_new_message(
+        self, update: Update, context: CallbackContext
+    ):
+        await self._show_main_menu(update, context, edit_previous_message=False)
+
+    async def _show_categories(
+        self, update: Update, context: CallbackContext, edit_previous_message=True
+    ) -> None:
         if update.callback_query:
             query = update.callback_query
             await query.answer()
@@ -764,19 +809,37 @@ class EcommerceTelegramBot:
                 choose_category_text, reply_markup=reply_markup
             )
         elif update.callback_query:
-            await query.edit_message_text(
-                choose_category_text, reply_markup=reply_markup
-            )
+            if edit_previous_message:
+                await query.edit_message_text(
+                    choose_category_text, reply_markup=reply_markup
+                )
+            else:
+                await query._get_message().reply_text(
+                    choose_category_text, reply_markup=reply_markup
+                )
+
+    async def _show_categories_in_new_message(
+        self, update: Update, context: CallbackContext
+    ):
+        await self._show_categories(update, context, edit_previous_message=False)
 
     async def _show_products_in_category(
         self, update: Update, context: CallbackContext
     ) -> None:
+        # TODO: Show pagination if the number of products in the category is big
+
         query = update.callback_query
         await query.answer()
+
+        user_id = query.from_user.id
+
         category_id = query.data.split(":")[1]
         category_id = int(category_id)
 
         category = self.ecommerce.get_category(category_id)
+
+        cart = self.ecommerce.get_cart(user_id)
+        num_products_in_cart = len(cart)
 
         product_list = self.ecommerce.browse_products(category_id=category_id)
 
@@ -792,7 +855,18 @@ class EcommerceTelegramBot:
             keyboard.append(
                 [
                     InlineKeyboardButton(
-                        _("Back to categories"), callback_data="categories"
+                        _("Cart ({num_products_in_cart})").format(
+                            num_products_in_cart=num_products_in_cart
+                        ),
+                        callback_data="cart",
+                    )
+                ]
+            )
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        _("Back to categories"),
+                        callback_data="show_categories_in_new_message",
                     )
                 ]
             )
@@ -846,54 +920,56 @@ class EcommerceTelegramBot:
         product_id = int(product_id)
 
         product = self.ecommerce.get_product(product_id)
-        product_category_id = product.category_id
-
-        category = self.ecommerce.get_category(product_category_id)
-        product_category_name = category.name
 
         user_id = query.from_user.id
 
         cart = self.ecommerce.get_cart(user_id)
-        cart.add_item(product_id)
+        cart_item = cart.add_product(product_id)
 
-        num_items_in_cart = len(cart)
+        num_products_in_cart = len(cart)
 
         keyboard = [
             [
                 InlineKeyboardButton(
-                    _("Cart ({num_items_in_cart})").format(
-                        num_items_in_cart=num_items_in_cart
+                    _("Cart ({num_products_in_cart})").format(
+                        num_products_in_cart=num_products_in_cart
                     ),
                     callback_data="cart",
-                ),
-                InlineKeyboardButton(
-                    product_category_name,
-                    callback_data=f"category:{product_category_id}",
-                ),
+                )
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
+        # TODO: Maybe to update previous message
         await query.message.reply_text(
-            _("Product added to cart: {product_name}").format(
+            _(
+                "Product added to cart: {product_name} ({item_quantity})\nTotal items: {num_products_in_cart}"
+            ).format(
+                item_quantity=cart_item.quantity,
                 product_name=product.name,
-                reply_markup=reply_markup,
-            )
+                num_products_in_cart=num_products_in_cart,
+            ),
+            reply_markup=reply_markup,
         )
 
     def create_cart_item_inline_keyboard(self, product_id):
         keyboard = [
             [
                 InlineKeyboardButton(
-                    "+", callback_data=f"add_one_product_to_cart:{product_id}"
+                    "-", callback_data=f"remove_one_product_from_cart:{product_id}"
                 ),
                 InlineKeyboardButton(
-                    "-", callback_data=f"remove_one_product_from_cart:{product_id}"
+                    "+", callback_data=f"add_one_product_to_cart:{product_id}"
                 ),
             ],
             [
                 InlineKeyboardButton(
                     _("Remove"), callback_data=f"remove_cart_item:{product_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    _("See product"), callback_data=f"product:{product_id}"
                 ),
             ],
         ]
@@ -930,9 +1006,21 @@ class EcommerceTelegramBot:
         user_id = query.from_user.id
 
         cart = self.ecommerce.get_cart(user_id)
-        item = cart.add_item(product_id)
+        cart_item = cart.add_product(product_id)
 
-        await self.edit_cart_item_message(query, item)
+        num_products_in_cart = len(cart)
+
+        await query.message.reply_text(
+            _(
+                "One product added to cart: {item_name} ({item_quantity})\nTotal items: {num_products_in_cart}"
+            ).format(
+                item_quantity=cart_item.quantity,
+                item_name=cart_item.name,
+                num_products_in_cart=num_products_in_cart,
+            )
+        )
+
+        await self.edit_cart_item_message(query, cart_item)
 
     async def _remove_one_product_from_cart(
         self, update: Update, context: CallbackContext
@@ -945,11 +1033,32 @@ class EcommerceTelegramBot:
         product_id = int(product_id)
 
         cart = self.ecommerce.get_cart(user_id)
-        item = cart.remove_item(product_id)
 
-        if item is None:
+        cart_item = cart.remove_product(product_id)
+        num_products_in_cart = len(cart)
+
+        if cart_item is None:
             await query.delete_message()
+
+            if num_products_in_cart == 0:
+                await query.message.reply_text(_("Item removed.\nCart is empty."))
+            else:
+                await query.message.reply_text(
+                    _("Item removed.\nTotal items: {num_products_in_cart}").format(
+                        num_products_in_cart=num_products_in_cart
+                    )
+                )
         else:
+            await query.message.reply_text(
+                _(
+                    "One product removed from cart: {item_name} ({item_quantity})\nTotal items: {num_products_in_cart}"
+                ).format(
+                    item_quantity=cart_item.quantity,
+                    item_name=cart_item.name,
+                    num_products_in_cart=num_products_in_cart,
+                )
+            )
+
             await self.edit_cart_item_message(query, item)
 
     async def _remove_cart_item(self, update: Update, context: CallbackContext) -> None:
@@ -961,16 +1070,25 @@ class EcommerceTelegramBot:
         product_id = int(product_id)
 
         cart = self.ecommerce.get_cart(user_id)
-        product_found = cart.remove_all_items_of_product(product_id)
+        item_found = cart.remove_item(product_id)
 
         await query.delete_message()
 
-        if product_found:
-            answer = _("Item removed from cart.")
-        else:
-            answer = _("Item not found in cart.")
+        if item_found:
+            num_products_in_cart = len(cart)
 
-        await query._get_message().reply_text(answer)
+            if num_products_in_cart == 0:
+                await query._get_message().reply_text(
+                    _("Item removed from cart.\nCart is empty.")
+                )
+            else:
+                await query._get_message().reply_text(
+                    _(
+                        "Item removed from cart.\nTotal items: {num_products_in_cart}"
+                    ).format(num_products_in_cart=num_products_in_cart)
+                )
+        else:
+            await query._get_message().reply_text(_("Item not found in cart."))
 
     async def _show_checkout(self, update: Update, context: CallbackContext) -> None:
         query = update.callback_query
@@ -982,8 +1100,17 @@ class EcommerceTelegramBot:
         cart = self.ecommerce.get_cart(user_id)
 
         if len(cart) == 0:
-            message.reply_text(_("Your cart is empty. Nothing to checkout."))
-            await self._show_main_menu(update, context)
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        _("Show main menu"), callback_data="main_menu_in_new_message"
+                    )
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await message.reply_text(
+                _("Nothing to checkout. Your cart is empty."), reply_markup=reply_markup
+            )
             return
 
         checkout_header_text = _("Checkout Summary")
@@ -996,24 +1123,16 @@ class EcommerceTelegramBot:
             + "\n"
         )
         cart_summary = cart.get_summary(summary_header=checkout_header)
+        cart_summary = md_monospace_font(escape_markdown(cart_summary))
 
-        message_text = (
-            "`"
-            + escape_markdown(cart_summary)
-            + "`"
-            + "\n\n\n\n"
-            + _("Proceed to payment?")
-            + "\n"
-        )
+        await message.reply_text(cart_summary, parse_mode=ParseMode.MARKDOWN)
 
         keyboard = [
             [InlineKeyboardButton(_("Pay Now"), callback_data="pay_now")],
             [InlineKeyboardButton(_("Back to Cart"), callback_data="cart")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await message.reply_text(
-            message_text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN
-        )
+        await message.reply_text(_("Proceed to payment?"), reply_markup=reply_markup)
 
         # keyboard = [[InlineKeyboardButton('Confirm Checkout', callback_data='confirm_checkout')]]
         # reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1034,8 +1153,22 @@ class EcommerceTelegramBot:
         cart_items = cart.get_items()
 
         if len(cart_items) == 0:
-            await message.reply_text(_("Your cart is empty."))
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        _("Show main menu"), callback_data="main_menu_in_new_message"
+                    )
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await message.reply_text(
+                _("Your cart is empty."), reply_markup=reply_markup
+            )
             return
+
+        await message.reply_text(
+            md_bold(_("Cart").upper()), parse_mode=ParseMode.MARKDOWN
+        )
 
         for cart_item in cart_items:
             await message.reply_text(**self.get_cart_item_message_kwargs(cart_item))
@@ -1138,7 +1271,7 @@ class EcommerceTelegramBot:
         cart = self.ecommerce.get_cart(user_id)
         cart.clear()
 
-        await self._show_main_menu(update, context)
+        await self._show_main_menu(update, context, edit_previous_message=False)
 
     async def _get_recommendations(
         self, update: Update, context: CallbackContext
@@ -1318,8 +1451,15 @@ Recommend products based on the user's request:
 
         localized_price = money.format_price(product.price)
 
+        product_category_id = product.category_id
+
+        category = self.ecommerce.get_category(product_category_id)
+        product_category_name = category.name
+
+        cart = self.ecommerce.get_cart(user_id)
+        num_products_in_cart = len(cart)
+
         # TODO: Show category breadcrumb
-        # TODO: Show num products in stock
         product_text = (
             f"*{product.name}*\n\n{product.description}\n\nPrice: {localized_price}"
         )
@@ -1333,11 +1473,29 @@ Recommend products based on the user's request:
                     )
                 ],
                 [
-                    InlineKeyboardButton(_("Cart"), callback_data="cart"),
+                    InlineKeyboardButton(
+                        (
+                            _("Cart ({num_products_in_cart})").format(
+                                num_products_in_cart=num_products_in_cart
+                            )
+                            if num_products_in_cart != 0
+                            else _("Cart")
+                        ),
+                        callback_data="cart",
+                    )
                 ],
                 [
                     InlineKeyboardButton(
-                        _("Back to Categories"), callback_data="categories"
+                        _("Category {product_category_name}").format(
+                            product_category_name=product_category_name
+                        ),
+                        callback_data=f"category:{product_category_id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        _("Back to Categories"),
+                        callback_data="show_categories_in_new_message",
                     )
                 ],
             ]
@@ -1394,13 +1552,12 @@ Recommend products based on the user's request:
         bot = application.bot
         await bot.set_my_commands(
             [
-                BotCommand("main_menu", _("Main menu")),
-                BotCommand("account", _("Account")),
                 BotCommand("categories", _("Categories")),
-                BotCommand("orders", _("Orders")),
                 BotCommand("cart", _("Cart")),
-                BotCommand("search", _("Search")),
                 BotCommand("recommendations", _("Recommendations")),
+                BotCommand("search", _("Search")),
+                BotCommand("orders", _("Orders")),
+                BotCommand("account", _("Account")),
             ]
         )
 
