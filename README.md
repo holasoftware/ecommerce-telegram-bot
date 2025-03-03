@@ -11,6 +11,7 @@ Reusable telegram bot to allow the user to buy products from different e-commerc
 - product recommendations using a large language model
 - easy navigation through product categories
 - product search
+- product variants
 
 ## Installation
 Create a virtualenv and activate it:

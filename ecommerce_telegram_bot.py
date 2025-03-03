@@ -41,6 +41,8 @@ from telegram.constants import ParseMode
 from telegram.helpers import escape_markdown
 
 
+# TODO: Catch exception telegram.error.TimedOut in query.answer()
+
 logger = logging.getLogger(__name__)
 
 
@@ -139,6 +141,11 @@ class CartItem:
     quantity: int
     discount: float | None = None
     variant_id: int | None = None
+    variant_title: str | None = None
+
+    @property
+    def is_variant(self):
+        return self.variant_id is not None
 
 
 @dataclass
@@ -151,8 +158,16 @@ class CartSession:
 class ProductVariant:
     id: int
     title: str
-    value: str
     stock: int
+    image_url: str | None = None
+
+    @property
+    def has_photo(self):
+        return self.image_url is not None
+
+    @property
+    def has_stock(self):
+        return self.stock > 0
 
 
 @dataclass
@@ -179,17 +194,36 @@ class Product:
 
     @property
     def has_variants(self):
-        return self.variants != None and len(self.variants) != 0
+        return self.variants is not None and len(self.variants) != 0
+
+    @property
+    def has_photo(self):
+        return self.image_urls is not None and len(self.image_urls) != 0
 
     @property
     def has_stock(self):
-        if self.has_variants():
-            if variant in self.variants:
-                if variant.stock > 0:
-                    return True
-            return False
-        else:
-            return self.stock > 0
+        return self.stock > 0
+
+    def get_variant_title(self, variant_id):
+        if not self.variants:
+            return
+
+        for variant in self.variants:
+            if variant.id == variant_id:
+                return variant.title
+
+    def _validate_stock(self):
+        if self.variants is not None:
+            return sum([variant.stock in variant in self.variants]) == self.stock
+
+        return True
+
+
+# class ProductBrowsePage:
+class ProductSearchPage:
+    products: list[Product]
+    page: int
+    page_size: int
 
 
 class ShoppingCart:
@@ -198,6 +232,8 @@ class ShoppingCart:
     Data is stored in memory (replace with a database in a real application).
     """
 
+    summary_row_template = "- {item_name}{variant_text} ({localized_item_unit_price}) x{item_quantity} = {localized_item_total}{discount_text}\n"
+
     def __init__(self, ecommerce, telegram_user_id):
         self.ecommerce = ecommerce
         self.telegram_user_id = telegram_user_id
@@ -205,15 +241,15 @@ class ShoppingCart:
     async def get_items(self):
         raise NotImplementedError
 
-    async def add_product(self, product_id, quantity=1):
+    async def add_product(self, product_id, variant_id=None, quantity=1):
         """Adds a product to the user'sawait cart."""
         raise NotImplementedError
 
-    async def remove_product(self, product_id, quantity=1):
+    async def remove_product(self, product_id, variant_id=None, quantity=1):
         """Removes a product from the user's cart by its product ID."""
         raise NotImplementedError
 
-    async def remove_item(self, product_id):
+    async def remove_item(self, product_id, variant_id=None):
         """Removes a product from the user's cart by its product ID."""
         raise NotImplementedError
 
@@ -280,10 +316,24 @@ class ShoppingCart:
 
             total_price += item_total
 
-            if item.discount:
-                summary_row = f"- {item.name} ({localized_item_unit_price}) x{item.quantity} = {localized_item_total}({item.discount * 100:.0f}% off)\n"
+            if item.variant_id is None:
+                variant_text = ""
             else:
-                summary_row = f"- {item.name} ({localized_item_unit_price}) x{item.quantity} = {localized_item_total}\n"
+                variant_text = " (" + _("Variant") + ": " + item.variant_title + ")"
+
+            if item.discount:
+                discount_text = f"({item.discount * 100:.0f}% off)"
+            else:
+                discount_text = ""
+
+            summary_row = self.summary_row_template.format(
+                item_name=item.name,
+                variant_text=variant_text,
+                localized_item_unit_price=localized_item_unit_price,
+                item_quantity=item.quantity,
+                localized_item_total=localized_item_total,
+                discount_text=discount_text,
+            )
 
             summary += summary_row
 
@@ -320,14 +370,11 @@ class Ecommerce:
     async def get_money_locale(self, telegram_user_id=None):
         return money_locale[self.default_locale]
 
-    async def browse_products(self, q=None, category_id=None, limit=None):
+    async def browse_products(self, q=None, category_id=None, page=1, page_size=5):
         raise NotImplementedError
 
-    async def get_order_history(self, telegram_user_id):
+    async def get_orders(self, telegram_user_id, page=1, page_size=5):
         raise NotImplementedError
-
-    async def get_all_products(self):
-        return await self.browse_products()
 
     async def get_product(self, product_id):
         raise NotImplementedError
@@ -341,8 +388,8 @@ class Ecommerce:
     def get_cart(self, telegram_user_id):
         return self.shopping_cart_class(self, telegram_user_id)
 
-    async def get_currency(self):
-        return await self.get_money_locale().currency
+    async def get_default_currency(self):
+        return (await self.get_money_locale()).currency
 
 
 class ShoppingCartDemo(ShoppingCart):
@@ -359,7 +406,7 @@ class ShoppingCartDemo(ShoppingCart):
 
         return False, None, None
 
-    async def add_product(self, product_id, quantity=1, variant_id=None):
+    async def add_product(self, product_id, variant_id=None, quantity=1):
         found, item_index, item = self._find_item_by_product_id(
             product_id, variant_id=variant_id
         )
@@ -368,6 +415,10 @@ class ShoppingCartDemo(ShoppingCart):
             item.quantity += quantity
         else:
             product = await self.ecommerce.get_product(product_id)
+            if variant_id is None:
+                variant_title = None
+            else:
+                variant_title = product.get_variant_title(variant_id)
 
             item = CartItem(
                 product_id=product_id,
@@ -376,12 +427,13 @@ class ShoppingCartDemo(ShoppingCart):
                 unit_price=product.price,
                 discount=product.discount,
                 variant_id=variant_id,
+                variant_title=variant_title,
             )
             self._items.append(item)
 
         return item
 
-    async def remove_product(self, product_id, quantity=1, variant_id=None):
+    async def remove_product(self, product_id, variant_id=None, quantity=1):
         found, item_index, item = self._find_item_by_product_id(
             product_id, variant_id=variant_id
         )
@@ -443,10 +495,16 @@ class EcommerceDemo(Ecommerce):
         ProductCategory(name="Non-fiction", id=10, parent_id=2),
     ]
 
+    probability_product_has_variants = 0.5
+    min_price = 1
+    max_price = 1000
+
     def __init__(self):
         self._carts = {}
         self._products = []
         self._products_in_category = []
+
+        self._variant_id = 0
 
         self._generate_demo_data()
 
@@ -460,9 +518,10 @@ class EcommerceDemo(Ecommerce):
                 if category.parent_id == parent_id
             ]
 
-    async def browse_products(self, q=None, category_id=None, limit=None):
+    async def browse_products(self, q=None, category_id=None, page=1, page_size=5):
+        # TODO: Return ProductSearchPage
         if category_id is None:
-            found_products = self._products
+            found_products = list(self._products)
         else:
             product_ids = self._products_in_category[category_id]
             found_products = []
@@ -483,8 +542,10 @@ class EcommerceDemo(Ecommerce):
                 )
             ]
 
-        if limit is not None:
-            found_products = found_products[:limit]
+        if page_size != 0 and page_size != None:
+            found_products = found_products[
+                (page_size * (page - 1)) : (page_size * page)
+            ]
 
         return found_products
 
@@ -504,21 +565,54 @@ class EcommerceDemo(Ecommerce):
                 product_id = len(products)
                 product_ids.append(product_id)
 
+                if self._maybe_product_has_variants():
+                    variants = self._create_demo_variants()
+                    stock = sum([variant.stock for variant in variants])
+                else:
+                    variants = None
+                    stock = self._get_random_product_stock()
+
                 products.append(
                     Product(
                         id=product_id,
                         category_id=category_id,
                         name="Product %d" % product_id,
+                        variants=variants,
                         image_urls=[
                             "https://fakeimg.pl/150",
                             "https://fakeimg.pl/200",
                             "https://fakeimg.pl/250",
                         ],
-                        stock=self._get_random_product_stock(),
+                        stock=stock,
                         description="This is product %d." % product_id,
-                        price=Decimal(random.randint(1, 1000)),
+                        price=self._get_random_price(),
                     )
                 )
+
+    def _get_random_price(self):
+        return Decimal(random.randint(self.min_price, self.max_price))
+
+    def _maybe_product_has_variants(self):
+        return (
+            True if random.random() < self.probability_product_has_variants else False
+        )
+
+    def _create_demo_variants(self):
+        variants = []
+        for i in range(self._get_random_num_variants()):
+            variants.append(
+                ProductVariant(
+                    id=self._variant_id,
+                    title="Variant %s" % i,
+                    stock=self._get_random_product_stock(),
+                )
+            )
+            self._variant_id += 1
+
+        return variants
+
+    def _get_random_num_variants(self):
+        return random.randint(1, 4)
 
     def _get_random_num_products_in_category(self):
         return random.randint(1, 5)
@@ -531,6 +625,10 @@ class EcommerceDemo(Ecommerce):
 
     async def get_category(self, category_id):
         return self.categories[category_id]
+
+
+EDIT_PREVIOUS_MESSAGE = "0"
+NEW_MESSAGE = "1"
 
 
 # TODO: 2 modes 'command' mode and 'search' mode. The default mode is 'search' mode
@@ -572,7 +670,7 @@ class EcommerceTelegramBot:
         self.llm_temperature = llm_temperature
 
         if product_recommendations_enabled and litellm is None:
-            logger.warn(
+            logger.warning(
                 "Module 'litellm' is not installed. Not possible to use product recommendations feature"
             )
             product_recommendations_enabled = False
@@ -580,7 +678,6 @@ class EcommerceTelegramBot:
         self.product_recommendations_enabled = product_recommendations_enabled
         self.payment_provider_token = payment_provider_token
 
-        self.currency = ecommerce.get_currency()
         self.ecommerce = ecommerce
         self.welcome_message = welcome_message
 
@@ -638,6 +735,12 @@ class EcommerceTelegramBot:
 
         application.add_handler(
             CallbackQueryHandler(self._show_product, pattern=r"^product:")
+        )
+        application.add_handler(
+            CallbackQueryHandler(
+                self._show_product_variants,
+                pattern=r"^show_product_variants:",
+            )
         )
         application.add_handler(
             CallbackQueryHandler(
@@ -756,7 +859,7 @@ class EcommerceTelegramBot:
         query = update.callback_query
         await query.answer()
 
-        await query.message.reply_text(
+        await query._get_message().reply_text(
             _("Write here your query:"), reply_markup=ForceReply(selective=True)
         )
 
@@ -860,17 +963,26 @@ class EcommerceTelegramBot:
             query = update.callback_query
             await query.answer()
 
+            telegram_user_id = query.from_user.id
+        else:
+            telegram_user_id = update.effective_user.id
+
         categories = await self.ecommerce.get_categories()
+
+        cart = self.ecommerce.get_cart(telegram_user_id)
+        num_products_in_cart = await cart.get_num_products()
 
         # TODO: Show num products in each category
         keyboard = [
             [
                 InlineKeyboardButton(
-                    category.name, callback_data=f"category:{category.id}:0"
+                    category.name,
+                    callback_data=f"category:{EDIT_PREVIOUS_MESSAGE}:{category.id}",
                 )
             ]
             for category in categories
         ]
+        keyboard.append([self._create_cart_inline_button(num_products_in_cart)])
         keyboard.append(
             [InlineKeyboardButton(_("Back to Main Menu"), callback_data="main_menu")]
         )
@@ -897,6 +1009,19 @@ class EcommerceTelegramBot:
     ):
         await self._show_categories(update, context, edit_previous_message=False)
 
+    def _create_cart_inline_button(self, num_products_in_cart):
+        return InlineKeyboardButton(
+            (
+                _("Cart")
+                + " ({num_products_in_cart})".format(
+                    num_products_in_cart=num_products_in_cart
+                )
+                if num_products_in_cart > 0
+                else ""
+            ),
+            callback_data="cart",
+        )
+
     async def _show_content_in_category(
         self, update: Update, context: CallbackContext
     ) -> None:
@@ -907,9 +1032,9 @@ class EcommerceTelegramBot:
 
         telegram_user_id = query.from_user.id
 
-        category_id, use_new_message = query.data.split(":")[1:]
+        use_new_message, category_id = query.data.split(":")[1:]
+        use_new_message = use_new_message == NEW_MESSAGE
         category_id = int(category_id)
-        use_new_message = use_new_message == "1"
 
         category = await self.ecommerce.get_category(category_id)
 
@@ -927,21 +1052,7 @@ class EcommerceTelegramBot:
                 ]
                 for product in product_list
             ]
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        (
-                            _("Cart")
-                            + " ({num_products_in_cart})".format(
-                                num_products_in_cart=num_products_in_cart
-                            )
-                            if num_products_in_cart > 0
-                            else ""
-                        ),
-                        callback_data="cart",
-                    )
-                ]
-            )
+            keyboard.append([self._create_cart_inline_button(num_products_in_cart)])
             keyboard.append(
                 [
                     InlineKeyboardButton(
@@ -1004,27 +1115,79 @@ class EcommerceTelegramBot:
             update=update, context=context, category_id=category_id
         )
 
+    def _get_payload(self, query):
+        payload = query.data.split(":")[1:]
+        return payload
+
+    def _get_product_id_variant_id_from_data(self, data):
+        payload = data.split(":")[1:]
+
+        if len(payload) == 1:
+            product_id = payload[0]
+            product_id = int(product_id)
+
+            variant_id = None
+        else:
+            product_id, variant_id = payload
+            product_id = int(product_id)
+            variant_id = int(variant_id)
+
+        return product_id, variant_id
+
     async def _add_to_cart(self, update: Update, context: CallbackContext) -> None:
         query = update.callback_query
         await query.answer()
 
-        product_id = query.data.split(":")[1]
-        product_id = int(product_id)
+        payload = self._get_payload(query)
+        edit_previous_message = payload[0] == EDIT_PREVIOUS_MESSAGE
+
+        rest_payload = payload[1:]
+
+        if len(rest_payload) == 1:
+            product_id = rest_payload[0]
+            product_id = int(product_id)
+
+            variant_id = None
+        else:
+            product_id, variant_id = rest_payload
+            product_id = int(product_id)
+            variant_id = int(variant_id)
 
         product = await self.ecommerce.get_product(product_id)
 
+        product_ref = (
+            str(product_id)
+            if variant_id is None
+            else str(product_id) + ":" + str(variant_id)
+        )
+
         if product.has_variants:
-            await self._show_product_variants(product, update, context)
-            return
+            if variant_id is None:
+                logger.warning(
+                    "Trying to add product with variants and not variant specified"
+                )
+                # TODO: Notify user of error
+                return
+
+            variant_title = product.get_variant_title(variant_id)
+            variant_text = " (" + variant_title + ")"
+        else:
+            variant_text = ""
 
         telegram_user_id = query.from_user.id
 
         cart = self.ecommerce.get_cart(telegram_user_id)
-        cart_item = await cart.add_product(product_id)
+        cart_item = await cart.add_product(product_id, variant_id)
 
         num_products_in_cart = await cart.get_num_products()
 
         keyboard = [
+            [
+                InlineKeyboardButton(
+                    _("Add another"),
+                    callback_data=f"add_to_cart:{EDIT_PREVIOUS_MESSAGE}:{product_ref}",
+                )
+            ],
             [
                 InlineKeyboardButton(
                     _("Cart ({num_products_in_cart})").format(
@@ -1032,64 +1195,81 @@ class EcommerceTelegramBot:
                     ),
                     callback_data="cart",
                 )
-            ]
+            ],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # TODO: Maybe to update previous message
-        await query.message.reply_text(
-            _(
-                "Product added to cart: {product_name} ({item_quantity})\nTotal items: {num_products_in_cart}"
+        if edit_previous_message:
+            handler = query.edit_message_text
+
+        else:
+            handler = query.message.reply_text
+
+        await handler(
+            text=_(
+                "Product added to cart: *{product_name}{variant_text}*\nQuantity: {item_quantity}"
             ).format(
                 item_quantity=cart_item.quantity,
-                product_name=product.name,
+                product_name=escape_markdown(product.name),
+                variant_text=(
+                    escape_markdown(variant_text) if variant_text != "" else ""
+                ),
                 num_products_in_cart=num_products_in_cart,
             ),
             reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN,
         )
 
-    def _show_product_variants(
-        self, product: Product, update: Update, context: CallbackContext
-    ) -> None:
-        pass
+    def create_cart_item_inline_keyboard(self, cart_item):
+        if cart_item.variant_id is None:
+            product_ref = str(cart_item.product_id)
+        else:
+            product_ref = str(cart_item.product_id) + ":" + str(cart_item.variant_id)
 
-    def create_cart_item_inline_keyboard(self, product_id):
         keyboard = [
             [
                 InlineKeyboardButton(
-                    "-", callback_data=f"remove_one_product_from_cart:{product_id}"
+                    "-", callback_data=f"remove_one_product_from_cart:{product_ref}"
                 ),
                 InlineKeyboardButton(
-                    "+", callback_data=f"add_one_product_to_cart:{product_id}"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    _("Remove"), callback_data=f"remove_cart_item:{product_id}"
+                    "+", callback_data=f"add_one_product_to_cart:{product_ref}"
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    _("See product"), callback_data=f"product:{product_id}"
+                    _("Remove"), callback_data=f"remove_cart_item:{product_ref}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    _("See product"), callback_data=f"product:{cart_item.product_id}"
                 ),
             ],
         ]
 
         return keyboard
 
-    async def get_cart_item_message_kwargs(self, item):
-        product_id = item.product_id
+    async def get_cart_item_message_kwargs(self, cart_item):
+        product_id = cart_item.product_id
 
         product = await self.ecommerce.get_product(product_id)
 
-        keyboard = self.create_cart_item_inline_keyboard(product.id)
+        keyboard = self.create_cart_item_inline_keyboard(cart_item)
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         return {
-            "text": "{product_name} ({quantity})\n".format(
-                product_name=product.name, quantity=item.quantity
+            "text": "*{product_name}{variant_text}*\n{quantity_label_text}: {quantity}".format(
+                product_name=escape_markdown(product.name),
+                variant_text=(
+                    " (" + escape_markdown(cart_item.variant_title) + ")"
+                    if cart_item.is_variant
+                    else ""
+                ),
+                quantity_label_text=_("Quantity"),
+                quantity=cart_item.quantity,
             ),
             "reply_markup": reply_markup,
+            "parse_mode": ParseMode.MARKDOWN,
         }
 
     async def edit_cart_item_message(self, query, cart_item):
@@ -1103,19 +1283,18 @@ class EcommerceTelegramBot:
         query = update.callback_query
         await query.answer()
 
-        product_id = query.data.split(":")[1]
-        product_id = int(product_id)
+        product_id, variant_id = self._get_product_id_variant_id_from_data(query.data)
 
         telegram_user_id = query.from_user.id
 
         cart = self.ecommerce.get_cart(telegram_user_id)
-        cart_item = await cart.add_product(product_id)
+        cart_item = await cart.add_product(product_id, variant_id)
 
         num_products_in_cart = await cart.get_num_products()
 
-        await query.message.reply_text(
+        await query._get_message().reply_text(
             _(
-                "One product added to cart: {item_name} ({item_quantity})\nTotal items: {num_products_in_cart}"
+                "One product added to cart: {item_name} ({item_quantity})\nTotal items in cart: {num_products_in_cart}"
             ).format(
                 item_quantity=cart_item.quantity,
                 item_name=cart_item.name,
@@ -1131,28 +1310,30 @@ class EcommerceTelegramBot:
         query = update.callback_query
         await query.answer()
 
+        product_id, variant_id = self._get_product_id_variant_id_from_data(query.data)
+
         telegram_user_id = query.from_user.id
-        product_id = query.data.split(":")[1]
-        product_id = int(product_id)
 
         cart = self.ecommerce.get_cart(telegram_user_id)
 
-        cart_item = await cart.remove_product(product_id)
+        cart_item = await cart.remove_product(product_id, variant_id)
         num_products_in_cart = await cart.get_num_products()
 
         if cart_item is None:
             await query.delete_message()
 
             if num_products_in_cart == 0:
-                await query.message.reply_text(_("Item removed.\nCart is empty."))
+                await query._get_message().reply_text(
+                    _("Item removed.\nCart is empty.")
+                )
             else:
-                await query.message.reply_text(
+                await query._get_message().reply_text(
                     _("Item removed.\nTotal items: {num_products_in_cart}").format(
                         num_products_in_cart=num_products_in_cart
                     )
                 )
         else:
-            await query.message.reply_text(
+            await query._get_message().reply_text(
                 _(
                     "One product removed from cart: {item_name} ({item_quantity})\nTotal items: {num_products_in_cart}"
                 ).format(
@@ -1393,7 +1574,7 @@ class EcommerceTelegramBot:
 
     async def _get_relevant_products(self, user_recommendation_request):
         # TODO: RAG system indexing the title and description of the product
-        products = await self.ecommerce.get_all_products()
+        products = await self.ecommerce.browse_products(page_size=0)  # Get all products
         return products
 
     async def _create_specifications_of_relevant_products(
@@ -1457,7 +1638,7 @@ Recommend products based on the user's request:
     async def _handle_request_for_product_recommendations(
         self, update: Update, context: CallbackContext
     ) -> None:
-        # TODO: Navigation to product detail
+        # TODO: Navigation button to product detail for every recommendation
         user_recommendation_request = update.message.text
         recommendations = await self._generate_recommendations(
             user_recommendation_request
@@ -1540,10 +1721,9 @@ Recommend products based on the user's request:
 
         product = await self.ecommerce.get_product(product_id)
         if product is None:
+            logger.warning(f"Product does not exist: #{product_id}")
             await query.reply_text(
-                _("Product does not exist: #{product_id}").format(
-                    product_id=product_id
-                ),
+                _("Product does not exist"),
                 chat_id=query.message.chat_id,
             )
             return
@@ -1563,48 +1743,72 @@ Recommend products based on the user's request:
         num_products_in_cart = await cart.get_num_products()
 
         # TODO: Show category breadcrumb
-        product_text = (
-            f"*{product.name}*\n\n{product.description}\n\nPrice: {localized_price}"
+
+        stock = product.stock if product.has_stock else _("Not available")
+        product_text = _(
+            "*{product_name}*\n\n{product_description}\n\nPrice: {localized_price}\n\nStock: {stock}"
+        ).format(
+            product_name=product.name,
+            product_description=product.description,
+            localized_price=localized_price,
+            stock=stock,
         )
 
-        product_reply_markup = InlineKeyboardMarkup(
-            [
+        keyboard = []
+
+        if product.has_stock:
+            if product.has_variants:
+                callback_data = f"show_product_variants:{product_id}"
+            else:
+                callback_data = f"add_to_cart:{NEW_MESSAGE}:{product_id}"
+
+            keyboard.append(
                 [
                     InlineKeyboardButton(
                         _("Add to Cart"),
-                        callback_data=f"add_to_cart:{product_id}",
+                        callback_data=callback_data,
                     )
-                ],
-                [
-                    InlineKeyboardButton(
-                        (
-                            _("Cart ({num_products_in_cart})").format(
-                                num_products_in_cart=num_products_in_cart
-                            )
-                            if num_products_in_cart != 0
-                            else _("Cart")
-                        ),
-                        callback_data="cart",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        _("Category {product_category_name}").format(
-                            product_category_name=product_category_name
-                        ),
-                        callback_data=f"category:{product_category_id}:1",
+                ]
+            )
+
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    (
+                        _("Cart ({num_products_in_cart})").format(
+                            num_products_in_cart=num_products_in_cart
+                        )
+                        if num_products_in_cart != 0
+                        else _("Cart")
                     ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        _("Back to Categories"),
-                        callback_data="show_categories_in_new_message",
-                    )
-                ],
+                    callback_data="cart",
+                )
             ]
         )
 
-        if product.image_urls is not None and len(product.image_urls) > 0:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    _("Category {product_category_name}").format(
+                        product_category_name=product_category_name
+                    ),
+                    callback_data=f"category:{NEW_MESSAGE}:{product_category_id}",
+                ),
+            ]
+        )
+
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    _("Back to Categories"),
+                    callback_data="show_categories_in_new_message",
+                )
+            ]
+        )
+
+        product_reply_markup = InlineKeyboardMarkup(keyboard)
+
+        if product.has_photo:
             if (
                 self.product_detail_image_view_type
                 == self.ProductDetailImageViewType.MAIN_PHOTO
@@ -1651,14 +1855,171 @@ Recommend products based on the user's request:
                     chat_id=chat_id,
                 )
         else:
-            await context.bot.send_message(
-                product_text,
+            await bot.send_message(
+                text=product_text,
                 reply_markup=product_reply_markup,
                 parse_mode=ParseMode.MARKDOWN,
                 chat_id=chat_id,
             )
 
+    async def _show_product_variants(
+        self, update: Update, context: CallbackContext
+    ) -> None:
+        query = update.callback_query
+        await query.answer()
+
+        chat_id = query._get_message().chat_id
+        bot = context.bot
+
+        product_id = query.data.split(":")[1]
+        product_id = int(product_id)
+
+        product = await self.ecommerce.get_product(product_id)
+        product_variants = sorted(product.variants, key=lambda x: x.title)
+
+        await bot.send_message(
+            text=_("Choose a product variant"),
+            chat_id=chat_id,
+        )
+
+        media = [
+            InputMediaPhoto(media=variant.image_url, caption=variant.title)
+            for variant in product_variants
+            if variant.image_url is not None
+        ]
+
+        if len(media) != 0:
+            await bot.send_media_group(
+                media=media, chat_id=chat_id, caption=_("Images of Variants")
+            )
+
+        for variant in product_variants:
+            text = "*" + variant.title + "*\n" + _("Stock") + ": %s" % variant.stock
+
+            if variant.has_stock:
+                keyboard = [
+                    [
+                        InlineKeyboardButton(
+                            (_("Add to cart")),
+                            callback_data=f"add_to_cart:{NEW_MESSAGE}:{product.id}:{variant.id}",
+                        )
+                    ]
+                ]
+                variant_reply_markup = InlineKeyboardMarkup(keyboard)
+            else:
+                variant_reply_markup = None
+
+            await bot.send_message(
+                text=text,
+                reply_markup=variant_reply_markup,
+                parse_mode=ParseMode.MARKDOWN,
+                chat_id=chat_id,
+            )
+
+    async def _show_product_variants(
+        self, update: Update, context: CallbackContext
+    ) -> None:
+        query = update.callback_query
+        await query.answer()
+
+        chat_id = query._get_message().chat_id
+        bot = context.bot
+
+        product_id = query.data.split(":")[1]
+        product_id = int(product_id)
+
+        product = await self.ecommerce.get_product(product_id)
+        product_variants = sorted(product.variants, key=lambda x: x.title)
+
+        await bot.send_message(
+            text=_("Choose a product variant"),
+            chat_id=chat_id,
+        )
+
+        for variant in product_variants:
+            text = "*" + variant.title + "*\n" + _("Stock") + ": %s" % variant.stock
+
+            if variant.has_stock:
+                keyboard = [
+                    [
+                        InlineKeyboardButton(
+                            (_("Add to cart")),
+                            callback_data=f"add_to_cart:{NEW_MESSAGE}:{product.id}:{variant.id}",
+                        )
+                    ]
+                ]
+                variant_reply_markup = InlineKeyboardMarkup(keyboard)
+            else:
+                variant_reply_markup = None
+
+            if variant.has_photo:
+                await bot.send_photo(
+                    photo=variant.image_url,
+                    caption=text,
+                    reply_markup=variant_reply_markup,
+                    parse_mode=ParseMode.MARKDOWN,
+                    chat_id=chat_id,
+                )
+            else:
+                await bot.send_message(
+                    text=text,
+                    reply_markup=variant_reply_markup,
+                    parse_mode=ParseMode.MARKDOWN,
+                    chat_id=chat_id,
+                )
+
+    async def _show_product_variants(
+        self, update: Update, context: CallbackContext
+    ) -> None:
+        query = update.callback_query
+        await query.answer()
+
+        chat_id = query._get_message().chat_id
+        bot = context.bot
+
+        product_id = query.data.split(":")[1]
+        product_id = int(product_id)
+
+        product = await self.ecommerce.get_product(product_id)
+        product_variants = sorted(product.variants, key=lambda x: x.title)
+
+        media = [
+            InputMediaPhoto(media=variant.image_url, caption=variant.title)
+            for variant in product_variants
+            if variant.image_url is not None
+        ]
+
+        title_scene = _("Choose a product variant:")
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    (f"{variant.title} ({variant.stock})"),
+                    callback_data=f"add_to_cart:{NEW_MESSAGE}:{product.id}:{variant.id}",
+                )
+            ]
+            for variant in product_variants
+        ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        if len(media) == 0:
+            await bot.send_message(
+                text=title_scene,
+                reply_markup=reply_markup,
+                chat_id=chat_id,
+            )
+        else:
+            await bot.send_media_group(
+                media=media,
+                chat_id=chat_id,
+                reply_markup=reply_markup,
+                caption=title_scene,
+            )
+
     async def _post_init(self, application: ApplicationBuilder):
+        self.currency = await self.ecommerce.get_default_currency()
+
         bot = application.bot
         await bot.set_my_commands(
             [
