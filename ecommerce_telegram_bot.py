@@ -219,11 +219,37 @@ class Product:
         return True
 
 
-# class ProductBrowsePage:
-class ProductSearchPage:
+# ProductBrowsePage
+@dataclass
+class ProductSearchResultsPage:
     products: list[Product]
-    page: int
+    page_num: int
     page_size: int
+    total: int
+
+    @property
+    def has_next(self):
+        return self.page_num != self.num_pages
+
+    @property
+    def has_previous(self):
+        return self.page_num != 1
+
+    @property
+    def num_pages(self):
+        return self.total // self.page_size
+
+    def __iter__(self):
+        return iter(self.products)
+
+    def __len__(self):
+        return len(self.products)
+
+    def __getitem__(self, index):
+        return self.products[index]
+
+    def __bool__(self):
+        return len(self.products) != 0
 
 
 class ShoppingCart:
@@ -370,7 +396,13 @@ class Ecommerce:
     async def get_money_locale(self, telegram_user_id=None):
         return money_locale[self.default_locale]
 
-    async def browse_products(self, q=None, category_id=None, page=1, page_size=5):
+    async def browse_products(
+        self,
+        q: str | None = None,
+        category_id: int | None = None,
+        page: int = 1,
+        page_size: int | None = 5,
+    ) -> ProductSearchResultsPage:
         raise NotImplementedError
 
     async def get_orders(self, telegram_user_id, page=1, page_size=5):
@@ -496,8 +528,15 @@ class EcommerceDemo(Ecommerce):
     ]
 
     probability_product_has_variants = 0.5
+
     min_price = 1
     max_price = 1000
+
+    min_num_products_in_category = 10
+    max_num_products_in_category = 100
+
+    min_num_product_variants = 1
+    max_num_product_variants = 4
 
     def __init__(self):
         self._carts = {}
@@ -518,7 +557,13 @@ class EcommerceDemo(Ecommerce):
                 if category.parent_id == parent_id
             ]
 
-    async def browse_products(self, q=None, category_id=None, page=1, page_size=5):
+    async def browse_products(
+        self,
+        q: str | None = None,
+        category_id: int | None = None,
+        page_num: int = 1,
+        page_size: int | None = 5,
+    ) -> ProductSearchResultsPage:
         # TODO: Return ProductSearchPage
         if category_id is None:
             found_products = list(self._products)
@@ -529,7 +574,9 @@ class EcommerceDemo(Ecommerce):
                 found_products.append(self._products[product_id])
 
         if len(found_products) == 0:
-            return found_products
+            return ProductSearchResultsPage(
+                products=found_products, page_num=1, page_size=page_size, total=0
+            )
 
         if q is not None:
             q = q.lower()
@@ -542,12 +589,20 @@ class EcommerceDemo(Ecommerce):
                 )
             ]
 
+        total = len(found_products)
+
         if page_size != 0 and page_size != None:
             found_products = found_products[
-                (page_size * (page - 1)) : (page_size * page)
+                (page_size * (page_num - 1)) : (page_size * page_num)
             ]
+        else:
+            page_size = len(self._products)
+            if page_num > 1:
+                found_products = []
 
-        return found_products
+        return ProductSearchResultsPage(
+            products=found_products, page_num=page_num, page_size=page_size, total=total
+        )
 
     def _generate_demo_data(self):
         categories = self.categories
@@ -612,10 +667,14 @@ class EcommerceDemo(Ecommerce):
         return variants
 
     def _get_random_num_variants(self):
-        return random.randint(1, 4)
+        return random.randint(
+            self.min_num_product_variants, self.max_num_product_variants
+        )
 
     def _get_random_num_products_in_category(self):
-        return random.randint(1, 5)
+        return random.randint(
+            self.min_num_products_in_category, self.max_num_products_in_category
+        )
 
     def _get_random_product_stock(self):
         return random.randint(1, 10)
@@ -870,11 +929,9 @@ class EcommerceTelegramBot:
     ) -> None:
         q = update.message.text
 
-        product_list = await self.ecommerce.browse_products(
-            q=q, category_id=category_id
-        )
+        page = await self.ecommerce.browse_products(q=q, category_id=category_id)
 
-        if len(product_list) == 0:
+        if len(page) == 0:
             await update.message.reply_text(_("No product found"))
         else:
             keyboard = [
@@ -883,7 +940,7 @@ class EcommerceTelegramBot:
                         product.name, callback_data=f"product:{product.id}"
                     )
                 ]
-                for product in product_list
+                for product in page
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1025,14 +1082,20 @@ class EcommerceTelegramBot:
     async def _show_content_in_category(
         self, update: Update, context: CallbackContext
     ) -> None:
-        # TODO: Show pagination if the number of products in the category is big
-
         query = update.callback_query
         await query.answer()
 
         telegram_user_id = query.from_user.id
 
-        use_new_message, category_id = query.data.split(":")[1:]
+        payload = self._get_payload(query)
+
+        if len(payload) == 2:
+            use_new_message, category_id = payload
+            page_num = 1
+        elif len(payload) == 3:
+            use_new_message, category_id, page_num = payload
+            page_num = int(page_num)
+
         use_new_message = use_new_message == NEW_MESSAGE
         category_id = int(category_id)
 
@@ -1041,17 +1104,41 @@ class EcommerceTelegramBot:
         cart = self.ecommerce.get_cart(telegram_user_id)
         num_products_in_cart = await cart.get_num_products()
 
-        product_list = await self.ecommerce.browse_products(category_id=category_id)
+        page = await self.ecommerce.browse_products(
+            category_id=category_id, page_num=page_num
+        )
 
-        if product_list:
+        if page:
             keyboard = [
                 [
                     InlineKeyboardButton(
                         product.name, callback_data=f"product:{product.id}"
                     )
                 ]
-                for product in product_list
+                for product in page
             ]
+
+            if len(page) < page.total:
+                pagination_buttons = []
+
+                if page.has_previous:
+                    pagination_buttons.append(
+                        InlineKeyboardButton(
+                            _("Previous"),
+                            callback_data=f"category:{EDIT_PREVIOUS_MESSAGE}:{category_id}:{page_num - 1}",
+                        )
+                    )
+                if page.has_next:
+                    pagination_buttons.append(
+                        InlineKeyboardButton(
+                            _("Next"),
+                            callback_data=f"category:{EDIT_PREVIOUS_MESSAGE}:{category_id}:{page_num + 1}",
+                        )
+                    )
+
+                if len(pagination_buttons) != 0:
+                    keyboard.append(pagination_buttons)
+
             keyboard.append([self._create_cart_inline_button(num_products_in_cart)])
             keyboard.append(
                 [
